@@ -4,6 +4,11 @@ use crate::ray_intersect::{Intersect, RayIntersect};
 use crate::material::Material;
 use crate::light::Light;
 use crate::color::Color;
+use crate::camera::CustomCamera;
+use std::f32::consts::PI;
+
+const SHADOW_BIAS: f32 = 1e-4;
+const MAX_RECURSION_DEPTH: i32 = 3; // Reducido de 5 a 3 para mejor rendimiento
 
 pub struct Sphere {
     pub center: Vector3,
@@ -45,64 +50,180 @@ impl RayIntersect for Sphere {
     }
 }
 
-// Phong lighting model implementation
-fn phong_lighting(intersect: &Intersect, light: &Light, view_dir: &Vector3) -> Color {
-    // Ambient component
-    let ambient_intensity = 0.1;
-    let ambient = intersect.material.diffuse * ambient_intensity;
-
-    // Diffuse component (Lambert)
-    let mut light_dir = light.position - intersect.point;
-    light_dir.normalize();
-    let diffuse_intensity = intersect.normal.dot(light_dir).max(0.0);
-    let diffuse = intersect.material.diffuse * (diffuse_intensity * intersect.material.albedo[0]);
-
-    // Specular component (Phong)
-    let reflect_dir = reflect(&(-light_dir), &intersect.normal);
-    let spec_intensity = view_dir.dot(reflect_dir).max(0.0).powf(intersect.material.specular);
-    let specular = Color::WHITE * (spec_intensity * intersect.material.albedo[1]);
-
-    // Combine all components
-    ambient + diffuse + specular
-}
-
+// Función de reflexión siguiendo la fórmula: R = I - 2(I·N)N
 fn reflect(incident: &Vector3, normal: &Vector3) -> Vector3 {
     *incident - *normal * 2.0 * incident.dot(*normal)
 }
 
-pub fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, objects: &[Box<dyn RayIntersect>], lights: &[Light]) -> Color {
+// Función de refracción siguiendo la Ley de Snell
+fn refract(incident: &Vector3, normal: &Vector3, eta: f32) -> Option<Vector3> {
+    let cos_i = -incident.dot(*normal).max(-1.0).min(1.0);
+    let sin_t2 = eta * eta * (1.0 - cos_i * cos_i);
+    
+    // Verificar reflexión total interna (RTI)
+    if sin_t2 > 1.0 {
+        return None; // RTI - no hay refracción
+    }
+    
+    let cos_t = (1.0 - sin_t2).sqrt();
+    Some(*incident * eta + *normal * (eta * cos_i - cos_t))
+}
+
+// Ecuaciones de Fresnel para determinar qué tanto se refleja vs refracta
+fn fresnel(incident: &Vector3, normal: &Vector3, ior: f32) -> f32 {
+    let cos_i = incident.dot(*normal).abs().max(-1.0).min(1.0);
+    let eta_i = 1.0;
+    let eta_t = ior;
+    
+    let sin_t = eta_i / eta_t * (1.0 - cos_i * cos_i).sqrt();
+    
+    if sin_t >= 1.0 {
+        return 1.0; // Reflexión total
+    }
+    
+    let cos_t = (1.0 - sin_t * sin_t).sqrt();
+    let cos_i = cos_i.abs();
+    
+    let r_ortho = ((eta_t * cos_i) - (eta_i * cos_t)) / ((eta_t * cos_i) + (eta_i * cos_t));
+    let r_para = ((eta_i * cos_i) - (eta_t * cos_t)) / ((eta_i * cos_i) + (eta_t * cos_t));
+    
+    (r_ortho * r_ortho + r_para * r_para) / 2.0
+}
+
+fn cast_shadow(
+    intersect: &Intersect,
+    light: &Light,
+    objects: &[Sphere],
+) -> f32 {
+    let mut light_dir = light.position - intersect.point;
+    light_dir.normalize();
+    let light_distance = (light.position - intersect.point).length();
+
+    let offset_normal = intersect.normal * SHADOW_BIAS;
+    let shadow_ray_origin = if light_dir.dot(intersect.normal) < 0.0 {
+        intersect.point - offset_normal
+    } else {
+        intersect.point + offset_normal
+    };
+
+    let mut shadow_intensity = 0.0;
+
+    for object in objects {
+        let shadow_intersect = object.ray_intersect(&shadow_ray_origin, &light_dir);
+        if shadow_intersect.is_intersecting && shadow_intersect.distance < light_distance {
+            let distance_ratio = shadow_intersect.distance / light_distance;
+            shadow_intensity = 1.0 - distance_ratio.powf(2.0).min(1.0);
+            break;
+        }
+    }
+
+    shadow_intensity
+}
+
+pub fn cast_ray(
+    ray_origin: &Vector3,
+    ray_direction: &Vector3,
+    objects: &[Sphere],
+    lights: &[Light],
+    depth: i32,
+) -> Color {
+    if depth <= 0 {
+        return Color::new(0, 0, 0); // Negro si alcanzamos máxima profundidad
+    }
+
     let mut intersect = Intersect::empty();
     let mut zbuffer = f32::INFINITY;
 
+    // Encontrar la intersección más cercana
     for object in objects {
-        let tmp = object.ray_intersect(ray_origin, ray_direction);
-        if tmp.is_intersecting && tmp.distance < zbuffer {
-            zbuffer = tmp.distance;
-            intersect = tmp;
+        let i = object.ray_intersect(ray_origin, ray_direction);
+        if i.is_intersecting && i.distance < zbuffer {
+            zbuffer = i.distance;
+            intersect = i;
         }
     }
 
     if !intersect.is_intersecting {
-        return Color::new(4, 12, 36);
+        return Color::new(135, 206, 235); // Color del cielo
     }
 
-    // Calculate lighting using Phong model
-    let mut view_dir = *ray_origin - intersect.point;
-    view_dir.normalize();
-    let mut final_color = Color::BLACK;
+    // Color local (iluminación Phong)
+    let mut color = Color::new(0, 0, 0);
+    
+    // Iluminación ambiente
+    let ambient = intersect.material.diffuse * 0.1;
+    color = color + ambient;
 
+    // Calcular iluminación directa para cada luz
     for light in lights {
-        let light_contribution = phong_lighting(&intersect, light, &view_dir);
-        final_color = final_color + light_contribution;
+        let mut light_dir = light.position - intersect.point;
+        light_dir.normalize();
+        let view_dir = (*ray_origin - intersect.point).normalized();
+        let reflect_dir = reflect(&-light_dir, &intersect.normal);
+
+        let shadow_intensity = cast_shadow(&intersect, light, objects);
+        let light_intensity = light.intensity * (1.0 - shadow_intensity);
+
+        // Componente difusa
+        let diffuse_intensity = intersect.normal.dot(light_dir).max(0.0);
+        let diffuse = intersect.material.diffuse * intersect.material.albedo[0] * diffuse_intensity * light_intensity;
+
+        // Componente especular
+        let specular_intensity = view_dir.dot(reflect_dir).max(0.0).powf(intersect.material.specular);
+        let specular = light.color * intersect.material.albedo[1] * specular_intensity * light_intensity;
+
+        color = color + diffuse + specular;
     }
 
-    final_color
+    // Calcular reflexión - Solo si vale la pena
+    let mut reflect_color = Color::new(0, 0, 0);
+    if intersect.material.albedo[2] > 0.01 { // Threshold para evitar cálculos innecesarios
+        let reflect_dir = reflect(ray_direction, &intersect.normal);
+        let reflect_origin = intersect.point + intersect.normal * SHADOW_BIAS;
+        reflect_color = cast_ray(&reflect_origin, &reflect_dir, objects, lights, depth - 1);
+    }
+
+    // Calcular refracción - Solo si vale la pena
+    let mut refract_color = Color::new(0, 0, 0);
+    if intersect.material.albedo[3] > 0.01 && intersect.material.transparency > 0.01 {
+        // Determinar si el rayo entra o sale del material
+        let mut normal = intersect.normal;
+        let mut eta = 1.0 / intersect.material.refractive_index; // aire -> material
+        
+        if ray_direction.dot(intersect.normal) > 0.0 {
+            // Rayo sale del material
+            normal = -normal;
+            eta = intersect.material.refractive_index; // material -> aire
+        }
+
+        if let Some(refract_dir) = refract(ray_direction, &normal, eta) {
+            let refract_origin = intersect.point - normal * SHADOW_BIAS;
+            refract_color = cast_ray(&refract_origin, &refract_dir, objects, lights, depth - 1);
+        }
+    }
+
+    // Aplicar ecuaciones de Fresnel para mezclar reflexión y refracción
+    let kr = if intersect.material.transparency > 0.0 {
+        fresnel(ray_direction, &intersect.normal, intersect.material.refractive_index)
+    } else {
+        intersect.material.albedo[2]
+    };
+
+    // Combinar todos los componentes
+    let local_contribution = 1.0 - intersect.material.albedo[2] - intersect.material.albedo[3];
+    color = color * local_contribution + 
+            reflect_color * kr + 
+            refract_color * (1.0 - kr) * intersect.material.transparency;
+
+    color
 }
 
-pub fn render(framebuffer: &mut Framebuffer, objects: &[Box<dyn RayIntersect>], lights: &[Light]) {
+pub fn render(framebuffer: &mut Framebuffer, objects: &[Sphere], camera: &CustomCamera, lights: &[Light]) {
     let width = framebuffer.width() as f32;
     let height = framebuffer.height() as f32;
     let aspect_ratio = width / height;
+    let fov = PI / 3.0;
+    let perspective_scale = (fov * 0.5).tan();
 
     for y in 0..framebuffer.height() {
         for x in 0..framebuffer.width() {
@@ -110,65 +231,22 @@ pub fn render(framebuffer: &mut Framebuffer, objects: &[Box<dyn RayIntersect>], 
             let screen_x = (2.0 * x as f32) / width - 1.0;
             let screen_y = -(2.0 * y as f32) / height + 1.0;
 
-            // Adjust for aspect ratio
-            let screen_x = screen_x * aspect_ratio;
+            // Adjust for aspect ratio and perspective 
+            let screen_x = screen_x * aspect_ratio * perspective_scale;
+            let screen_y = screen_y * perspective_scale;
 
             // Calculate the direction of the ray for this pixel
             let mut ray_direction = Vector3::new(screen_x, screen_y, -1.0);
             ray_direction.normalize();
 
+            // Apply camera rotation to the ray direction
+            let rotated_direction = camera.basis_change(&ray_direction);
+
             // Cast the ray and get the pixel color
-            let pixel_color = cast_ray(&Vector3::new(0.0, 0.0, 0.0), &ray_direction, objects, lights);
+            let pixel_color = cast_ray(&camera.eye, &rotated_direction, objects, lights, MAX_RECURSION_DEPTH);
 
             // Draw the pixel on screen with the returned color
-            framebuffer.set_current_color(pixel_color.to_raylib());
-            framebuffer.set_pixel(x as u32, y as u32);
+            framebuffer.set_pixel_with_color(x as u32, y as u32, pixel_color);
         }
     }
-}
-
-pub fn render_sphere(framebuffer: &mut Framebuffer) {
-    // Create multiple sphere objects with Phong materials
-    let sphere1 = Sphere {
-        center: Vector3::new(1.0, 0.0, -4.0),
-        radius: 1.0,
-        material: Material::new(
-            Color::new(255, 255, 240), // ivory color
-            50.0,                       // specular exponent
-            [0.6, 0.3]                  // albedo [diffuse, specular]
-        ),
-    };
-
-    let sphere2 = Sphere {
-        center: Vector3::new(2.0, 0.0, -5.0),
-        radius: 1.0,
-        material: Material::new(
-            Color::new(139, 69, 19),    // brown/rubber color
-            10.0,                       // lower specular exponent
-            [0.9, 0.1]                  // more diffuse, less specular
-        ),
-    };
-
-    // Create lights
-    let lights = vec![
-        Light::new(
-            Vector3::new(-3.0, 3.0, -2.0),
-            Color::WHITE,
-            1.0
-        ),
-        Light::new(
-            Vector3::new(3.0, -3.0, -2.0),
-            Color::new(255, 100, 100), // reddish light
-            0.5
-        ),
-    ];
-
-    // Create a vector of objects
-    let objects: Vec<Box<dyn RayIntersect>> = vec![
-        Box::new(sphere1),
-        Box::new(sphere2),
-    ];
-
-    // Render the scene with lighting
-    render(framebuffer, &objects, &lights);
 }

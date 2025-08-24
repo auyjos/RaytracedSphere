@@ -1,4 +1,5 @@
 use raylib::prelude::*;
+use crate::color::Color as CustomColor;
 
 pub struct Framebuffer {
     width: i32,
@@ -29,9 +30,15 @@ impl Framebuffer {
     pub fn set_pixel(&mut self, x: u32, y: u32) {
         // Check bounds to ensure we don't go out of buffer
         if x < self.width as u32 && y < self.height as u32 {
-            
-         self.color_buffer.draw_pixel(x as i32, y as i32, self.current_color);
-            
+            self.color_buffer.draw_pixel(x as i32, y as i32, self.current_color);
+        }
+    }
+
+    // Set pixel with custom color directly
+    pub fn set_pixel_with_color(&mut self, x: u32, y: u32, color: CustomColor) {
+        if x < self.width as u32 && y < self.height as u32 {
+            let raylib_color = Color::new(color.r, color.g, color.b, 255);
+            self.color_buffer.draw_pixel(x as i32, y as i32, raylib_color);
         }
     }
 

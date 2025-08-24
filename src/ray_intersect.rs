@@ -25,7 +25,7 @@ impl Intersect {
         Intersect {
             distance: 0.0,
             is_intersecting: false,
-            material: Material::black(),
+            material: Material::rubber(), // Usar un material válido
             point: Vector3::new(0.0, 0.0, 0.0),
             normal: Vector3::new(0.0, 0.0, 0.0),
         }
