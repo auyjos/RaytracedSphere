@@ -1,5 +1,8 @@
 mod framebuffer;
 mod sphere;
+mod cube;
+mod texture;
+mod renderer;
 mod ray_intersect;
 mod color;
 mod light;
@@ -8,7 +11,9 @@ mod camera;
 
 use raylib::prelude::*;
 use framebuffer::Framebuffer;
-use sphere::{render, Sphere};
+use renderer::{render, Object};
+use cube::Cube;
+use texture::Texture;
 use camera::CustomCamera;
 use light::Light;
 use material::Material;
@@ -30,47 +35,53 @@ fn main() {
 
     let mut framebuffer = Framebuffer::new(framebuffer_width, framebuffer_height, raylib::color::Color::BLACK);
 
-    framebuffer.set_background_color(raylib::color::Color::new(50, 50, 100, 255));
+    framebuffer.set_background_color(raylib::color::Color::new(135, 206, 235, 255));
     framebuffer.clear();
 
-    // Materials and Objects - Mejor distribución y tamaños
-    let objects = [
-        // Esfera de goma (roja, izquierda)
-        Sphere { 
-            center: Vector3::new(-3.0, 0.0, -5.0), 
-            radius: 1.2, 
-            material: Material::rubber() 
-        },
-        // Esfera de marfil (centro)
-        Sphere { 
-            center: Vector3::new(0.0, 0.0, -4.0), 
-            radius: 1.0, 
-            material: Material::ivory() 
-        },
-        // Esfera espejo (derecha)
-        Sphere { 
-            center: Vector3::new(3.0, 0.0, -5.0), 
-            radius: 1.2, 
-            material: Material::mirror() 
-        },
-        // Esfera de vidrio (arriba)
-        Sphere { 
-            center: Vector3::new(0.0, 2.5, -4.5), 
-            radius: 1.0, 
-            material: Material::glass() 
-        },
-        // Esfera grande como "suelo" - Más lejos para mejor perspectiva
-        Sphere { 
-            center: Vector3::new(0.0, -1001.5, -1.0), 
-            radius: 1000.0, 
-            material: Material::new(
-                Color::new(120, 120, 120),
-                20.0,
-                [0.7, 0.3, 0.1, 0.0], // Ligeramente reflectante
+    // Create textures
+    let textures = vec![
+        Texture::checkerboard(64, 64, Color::new(255, 255, 255), Color::new(0, 0, 0)),     // 0: Checkerboard
+        Texture::brick(64, 64),                                                             // 1: Brick
+        Texture::wood(64, 64),                                                              // 2: Wood
+        Texture::marble(64, 64),                                                            // 3: Marble
+        Texture::metal(64, 64),                                                             // 4: Metal
+    ];
+
+    // Create objects - Mix of cubes and spheres with different materials and textures
+    let objects = vec![
+        // Textured cubes
+        Object::Cube(
+            Cube::new(Vector3::new(-3.0, 0.0, -5.0), 2.0, Material::ivory())
+                .with_texture(0) // Checkerboard
+        ),
+        Object::Cube(
+            Cube::new(Vector3::new(0.0, 0.0, -4.0), 2.0, Material::new(
+                Color::new(139, 69, 19), // Brick color base
+                50.0,
+                [0.8, 0.2, 0.0, 0.0],
                 1.0,
                 0.0,
-            )
-        },
+            )).with_texture(1) // Brick texture
+        ),
+        Object::Cube(
+            Cube::new(Vector3::new(3.0, 0.0, -5.0), 2.0, Material::mirror())
+                .with_texture(4) // Metal texture
+        ),
+        Object::Cube(
+            Cube::new(Vector3::new(0.0, 2.5, -4.5), 2.0, Material::glass())
+                .with_texture(3) // Marble texture
+        ),
+        
+        // Large cube as "floor" with wood texture
+        Object::Cube(
+            Cube::new(Vector3::new(0.0, -1002.0, -1.0), 2000.0, Material::new(
+                Color::new(139, 115, 85), // Wood color base
+                20.0,
+                [0.7, 0.3, 0.1, 0.0],
+                1.0,
+                0.0,
+            )).with_texture(2) // Wood texture
+        ),
     ];
 
     // Initialize camera - Mejor posición inicial
@@ -128,7 +139,7 @@ fn main() {
         }
 
         // Render the scene
-        render(&mut framebuffer, &objects, &camera, &lights);
+        render(&mut framebuffer, &objects, &camera, &lights, &textures);
         
         framebuffer.swap_buffers(&mut window, &raylib_thread);
     }

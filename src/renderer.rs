@@ -5,49 +5,51 @@ use crate::material::Material;
 use crate::light::Light;
 use crate::color::Color;
 use crate::camera::CustomCamera;
+use crate::sphere::Sphere;
+use crate::cube::Cube;
+use crate::texture::Texture;
 use std::f32::consts::PI;
 
 const SHADOW_BIAS: f32 = 1e-4;
-const MAX_RECURSION_DEPTH: i32 = 3; // Reducido de 5 a 3 para mejor rendimiento
+const MAX_RECURSION_DEPTH: i32 = 3;
 
+// Enum to handle different object types
 #[derive(Clone)]
-pub struct Sphere {
-    pub center: Vector3,
-    pub radius: f32,
-    pub material: Material,
+pub enum Object {
+    Sphere(Sphere),
+    Cube(Cube),
 }
 
-impl RayIntersect for Sphere {
+impl RayIntersect for Object {
     fn ray_intersect(&self, ray_origin: &Vector3, ray_direction: &Vector3) -> Intersect {
-        // Vector from the ray origin to the center of the sphere
-        let oc = *ray_origin - self.center;
+        match self {
+            Object::Sphere(sphere) => sphere.ray_intersect(ray_origin, ray_direction),
+            Object::Cube(cube) => cube.ray_intersect(ray_origin, ray_direction),
+        }
+    }
+}
 
-        // Coefficients for the quadratic equation
-        let a = ray_direction.dot(*ray_direction);
-        let b = 2.0 * oc.dot(*ray_direction);
-        let c = oc.dot(oc) - self.radius * self.radius;
+impl Object {
+    pub fn get_material(&self) -> Material {
+        match self {
+            Object::Sphere(sphere) => sphere.material,
+            Object::Cube(cube) => cube.material,
+        }
+    }
 
-        // Discriminant of the quadratic equation
-        let discriminant = b * b - 4.0 * a * c;
-
-        // The ray intersects the sphere if the discriminant is greater than zero
-        if discriminant > 0.0 {
-            let sqrt_discriminant = discriminant.sqrt();
-            let t1 = (-b - sqrt_discriminant) / (2.0 * a);
-            let t2 = (-b + sqrt_discriminant) / (2.0 * a);
-
-            // We want the closest positive intersection
-            let t = if t1 > 0.0 { t1 } else { t2 };
-
-            if t > 0.0 {
-                let point = *ray_origin + *ray_direction * t;
-                let mut normal = point - self.center;
-                normal.normalize();
-                return Intersect::new(point, normal, t, self.material.clone());
+    pub fn get_texture_color(&self, intersect: &Intersect, textures: &[Texture]) -> Color {
+        match self {
+            Object::Sphere(_) => intersect.material.diffuse, // Spheres use solid colors
+            Object::Cube(cube) => {
+                if let Some(texture_id) = cube.texture_id {
+                    if texture_id < textures.len() {
+                        let (u, v) = cube.get_uv(intersect.point, intersect.normal);
+                        return textures[texture_id].sample(u, v);
+                    }
+                }
+                intersect.material.diffuse // Fallback to material color
             }
         }
-
-        Intersect::empty()
     }
 }
 
@@ -94,7 +96,7 @@ fn fresnel(incident: &Vector3, normal: &Vector3, ior: f32) -> f32 {
 fn cast_shadow(
     intersect: &Intersect,
     light: &Light,
-    objects: &[Sphere],
+    objects: &[Object],
 ) -> f32 {
     let mut light_dir = light.position - intersect.point;
     light_dir.normalize();
@@ -124,8 +126,9 @@ fn cast_shadow(
 pub fn cast_ray(
     ray_origin: &Vector3,
     ray_direction: &Vector3,
-    objects: &[Sphere],
+    objects: &[Object],
     lights: &[Light],
+    textures: &[Texture],
     depth: i32,
 ) -> Color {
     if depth <= 0 {
@@ -134,6 +137,7 @@ pub fn cast_ray(
 
     let mut intersect = Intersect::empty();
     let mut zbuffer = f32::INFINITY;
+    let mut closest_object: Option<&Object> = None;
 
     // Encontrar la intersección más cercana
     for object in objects {
@@ -141,6 +145,7 @@ pub fn cast_ray(
         if i.is_intersecting && i.distance < zbuffer {
             zbuffer = i.distance;
             intersect = i;
+            closest_object = Some(object);
         }
     }
 
@@ -148,11 +153,16 @@ pub fn cast_ray(
         return Color::new(135, 206, 235); // Color del cielo
     }
 
+    let closest_object = closest_object.unwrap();
+
+    // Get texture color for the surface
+    let surface_color = closest_object.get_texture_color(&intersect, textures);
+    
     // Color local (iluminación Phong)
     let mut color = Color::new(0, 0, 0);
     
     // Iluminación ambiente
-    let ambient = intersect.material.diffuse * 0.1;
+    let ambient = surface_color * 0.1;
     color = color + ambient;
 
     // Calcular iluminación directa para cada luz
@@ -165,9 +175,9 @@ pub fn cast_ray(
         let shadow_intensity = cast_shadow(&intersect, light, objects);
         let light_intensity = light.intensity * (1.0 - shadow_intensity);
 
-        // Componente difusa
+        // Componente difusa usando color de textura
         let diffuse_intensity = intersect.normal.dot(light_dir).max(0.0);
-        let diffuse = intersect.material.diffuse * intersect.material.albedo[0] * diffuse_intensity * light_intensity;
+        let diffuse = surface_color * intersect.material.albedo[0] * diffuse_intensity * light_intensity;
 
         // Componente especular
         let specular_intensity = view_dir.dot(reflect_dir).max(0.0).powf(intersect.material.specular);
@@ -178,28 +188,26 @@ pub fn cast_ray(
 
     // Calcular reflexión - Solo si vale la pena
     let mut reflect_color = Color::new(0, 0, 0);
-    if intersect.material.albedo[2] > 0.01 { // Threshold para evitar cálculos innecesarios
+    if intersect.material.albedo[2] > 0.01 {
         let reflect_dir = reflect(ray_direction, &intersect.normal);
         let reflect_origin = intersect.point + intersect.normal * SHADOW_BIAS;
-        reflect_color = cast_ray(&reflect_origin, &reflect_dir, objects, lights, depth - 1);
+        reflect_color = cast_ray(&reflect_origin, &reflect_dir, objects, lights, textures, depth - 1);
     }
 
     // Calcular refracción - Solo si vale la pena
     let mut refract_color = Color::new(0, 0, 0);
     if intersect.material.albedo[3] > 0.01 && intersect.material.transparency > 0.01 {
-        // Determinar si el rayo entra o sale del material
         let mut normal = intersect.normal;
-        let mut eta = 1.0 / intersect.material.refractive_index; // aire -> material
+        let mut eta = 1.0 / intersect.material.refractive_index;
         
         if ray_direction.dot(intersect.normal) > 0.0 {
-            // Rayo sale del material
             normal = -normal;
-            eta = intersect.material.refractive_index; // material -> aire
+            eta = intersect.material.refractive_index;
         }
 
         if let Some(refract_dir) = refract(ray_direction, &normal, eta) {
             let refract_origin = intersect.point - normal * SHADOW_BIAS;
-            refract_color = cast_ray(&refract_origin, &refract_dir, objects, lights, depth - 1);
+            refract_color = cast_ray(&refract_origin, &refract_dir, objects, lights, textures, depth - 1);
         }
     }
 
@@ -219,7 +227,13 @@ pub fn cast_ray(
     color
 }
 
-pub fn render(framebuffer: &mut Framebuffer, objects: &[Sphere], camera: &CustomCamera, lights: &[Light]) {
+pub fn render(
+    framebuffer: &mut Framebuffer, 
+    objects: &[Object], 
+    camera: &CustomCamera, 
+    lights: &[Light],
+    textures: &[Texture]
+) {
     let width = framebuffer.width() as f32;
     let height = framebuffer.height() as f32;
     let aspect_ratio = width / height;
@@ -244,7 +258,7 @@ pub fn render(framebuffer: &mut Framebuffer, objects: &[Sphere], camera: &Custom
             let rotated_direction = camera.basis_change(&ray_direction);
 
             // Cast the ray and get the pixel color
-            let pixel_color = cast_ray(&camera.eye, &rotated_direction, objects, lights, MAX_RECURSION_DEPTH);
+            let pixel_color = cast_ray(&camera.eye, &rotated_direction, objects, lights, textures, MAX_RECURSION_DEPTH);
 
             // Draw the pixel on screen with the returned color
             framebuffer.set_pixel_with_color(x as u32, y as u32, pixel_color);
